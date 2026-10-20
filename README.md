@@ -99,6 +99,7 @@ Node.js 22 recommandé (≥ 20 fonctionne).
 | `NODE_ENV` | conseillé | — | `production` active les cookies `secure` et les contrôles stricts |
 | `SITE_EXPORT_TOKEN` | conseillé | — | Jeton Bearer de l'export admin du site (= `ANTICHEAT_EXPORT_TOKEN` du site) ; active la synchro automatique |
 | `EXPORT_INTERVAL_S` | non | 300 | Intervalle de synchro de l'export (min 60) |
+| `ALLOWED_FRAME_ANCESTORS` | non | 'self' https://liveroums-arena.onrender.com | Origines autorisées à afficher le tableau de bord en iframe (CSP frame-ancestors) |
 | `SITE_URL` | non | https://liveroums-arena.onrender.com | Site surveillé |
 | `COLLECT_ENABLED` | non | 1 | `0` pour désactiver la collecte (import seul) |
 | `COLLECT_RPM` | non | 40 | Requêtes/min vers le site (max 100) |
@@ -121,4 +122,6 @@ Node.js 22 recommandé (≥ 20 fonctionne).
 
 ## Sécurité
 
-Helmet avec CSP à nonce, session `httpOnly` / `SameSite=Strict` / `secure` (8 h), protection CSRF sur tous les POST, comparaison du jeton à temps constant, limites de débit (300 req/min global, 10 connexions/15 min), webhook Discord sans mentions. Aucune donnée sensible n'est collectée : uniquement ce qui est déjà public sur le site.
+Intégration au site : le tableau de bord s'affiche dans la page admin `/admin/anti-triche` du site via une iframe. Seules les origines de `ALLOWED_FRAME_ANCESTORS` peuvent l'intégrer (CSP `frame-ancestors`, X-Frame-Options retiré car il ne sait pas autoriser une autre origine). En production, le cookie de session est `SameSite=None; Secure` pour que la connexion fonctionne dans l'iframe ; la protection CSRF par jeton reste exigée sur tous les POST. Si le site change d'adresse, mettre à jour cette variable.
+
+Helmet avec CSP à nonce, session `httpOnly` / `SameSite=Strict` (local) / `SameSite=None` (production, pour l'iframe) / `secure` (8 h), protection CSRF sur tous les POST, comparaison du jeton à temps constant, limites de débit (300 req/min global, 10 connexions/15 min), webhook Discord sans mentions. Aucune donnée sensible n'est collectée : uniquement ce qui est déjà public sur le site.

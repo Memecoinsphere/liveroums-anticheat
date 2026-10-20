@@ -17,6 +17,8 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: ALLOWED_FRAME_ANCESTORS  # origines autorisées à intégrer le tableau de bord (iframe /admin/anti-triche du site)
+        value: "'self' https://liveroums-arena.onrender.com"
       - key: SITE_URL
         value: https://liveroums-arena.onrender.com
       - key: SITE_EXPORT_TOKEN    # = ANTICHEAT_EXPORT_TOKEN du site ; active la synchro automatique (source principale)

@@ -15,6 +15,8 @@ const { esc } = V;
 function createApp({ db = open(), env = process.env, syncOpts = {} } = {}) {
   const SYNC = createSync(db, { base: env.SITE_URL || undefined, token: env.SITE_EXPORT_TOKEN || '', intervalS: +env.EXPORT_INTERVAL_S || 300, ...syncOpts });
   const PROD = env.NODE_ENV === 'production';
+  // Origines autorisées à intégrer le tableau de bord en iframe (page /admin/anti-triche du site)
+  const FRAME_ANCESTORS = String(env.ALLOWED_FRAME_ANCESTORS || "'self' https://liveroums-arena.onrender.com").split(/[\s,]+/).filter(x => x === "'self'" || x === "'none'" || /^https?:\/\/[a-z0-9.-]+(:\d+)?$/i.test(x));
   const TOKEN = env.ADMIN_TOKEN || '';
   if (TOKEN.length < 16) { if (PROD) { console.error('FATAL : ADMIN_TOKEN absent ou trop court (16 caractères minimum).'); process.exit(1); } }
   const SECRET = env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
@@ -31,13 +33,13 @@ function createApp({ db = open(), env = process.env, syncOpts = {} } = {}) {
   app.use((req, res, next) => { res.locals.nonce = crypto.randomBytes(16).toString('base64'); next(); });
   app.use(helmet({ contentSecurityPolicy: { useDefaults: false, directives: { 'default-src': ["'self'"], 'script-src': ["'self'", (q, r) => `'nonce-${r.locals.nonce}'`], 'script-src-attr': ["'none'"],
     'style-src': ["'self'", 'https://fonts.googleapis.com'], 'font-src': ["'self'", 'https://fonts.gstatic.com'], 'img-src': ["'self'", 'data:'], 'connect-src': ["'self'"],
-    'object-src': ["'none'"], 'base-uri': ["'self'"], 'form-action': ["'self'"], 'frame-ancestors': ["'none'"] } },
-    strictTransportSecurity: PROD ? { maxAge: 31536000, includeSubDomains: true } : false, referrerPolicy: { policy: 'no-referrer' }, frameguard: { action: 'deny' } }));
+    'object-src': ["'none'"], 'base-uri': ["'self'"], 'form-action': ["'self'"], 'frame-ancestors': FRAME_ANCESTORS } },
+    strictTransportSecurity: PROD ? { maxAge: 31536000, includeSubDomains: true } : false, referrerPolicy: { policy: 'no-referrer' }, frameguard: false })); // X-Frame-Options ne sait pas autoriser une autre origine : frame-ancestors (CSP) fait foi
   app.use(express.static(require('path').join(__dirname, '..', 'public')));
   app.get('/healthz', (req, res) => res.json({ ok: true }));
   app.use(express.urlencoded({ extended: false, limit: '6mb', parameterLimit: 50 }));
   app.use(session({ name: 'ac.sid', secret: SECRET, store: new Store(), resave: false, saveUninitialized: false, rolling: true,
-    cookie: { httpOnly: true, sameSite: 'strict', secure: PROD, maxAge: 8 * 36e5 } }));
+    cookie: { httpOnly: true, sameSite: PROD ? 'none' : 'strict', secure: PROD, maxAge: 8 * 36e5 } })); // SameSite=None (+ Secure) en prod : connexion possible dans l'iframe du site ; CSRF toujours exigé
   const limiter = (windowMs, limit) => rateLimit({ windowMs, limit, standardHeaders: 'draft-7', legacyHeaders: false, handler: (req, res) => res.status(429).send('Trop de requêtes. Réessaie plus tard.') });
   app.use(limiter(6e4, 300));
   // CSRF : jeton par session, ajouté à chaque formulaire POST rendu

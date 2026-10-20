@@ -30,3 +30,17 @@ test('bon jeton → accès au tableau de bord, puis déconnexion', async () => {
   const t2 = csrf(html); const o = await f('/deconnexion', form({ _csrf: t2 })); assert.ok([302, 303].includes(o.status));
   assert.ok([302, 303].includes((await f('/')).status));
 });
+test('intégration iframe : frame-ancestors limité au site, pas de X-Frame-Options DENY', async () => {
+  const r = await fetch(base + '/connexion'); const csp = r.headers.get('content-security-policy');
+  assert.match(csp, /frame-ancestors 'self' https:\/\/liveroums-arena\.onrender\.com/); assert.equal(r.headers.get('x-frame-options'), null);
+});
+test('production : cookie de session SameSite=None; Secure, origines d’iframe configurables', async () => {
+  const { app } = createApp({ db: open(':memory:'), env: { NODE_ENV: 'production', ADMIN_TOKEN: TOKEN, SESSION_SECRET: 'x'.repeat(40), ALLOWED_FRAME_ANCESTORS: "'self' https://exemple.gg javascript:alert(1)" } });
+  app.set('trust proxy', 1);
+  const s = await new Promise(r => { const x = app.listen(0, () => r(x)); });
+  try {
+    const r = await fetch(`http://127.0.0.1:${s.address().port}/connexion`, { headers: { 'x-forwarded-proto': 'https' } });
+    assert.match(r.headers.get('content-security-policy'), /frame-ancestors 'self' https:\/\/exemple\.gg$/);
+    const ck = (r.headers.getSetCookie() || []).join(';'); assert.match(ck, /SameSite=None/i); assert.match(ck, /Secure/i);
+  } finally { s.close(); }
+});

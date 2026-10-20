@@ -6,12 +6,14 @@ const helmet = require('helmet');
 const { rateLimit } = require('express-rate-limit');
 const { open } = require('./db');
 const { collector } = require('./collector');
+const { createSync } = require('./sync');
 const engine = require('./engine');
 const { importData } = require('./importer');
 const V = require('./views');
 const { esc } = V;
 
-function createApp({ db = open(), env = process.env } = {}) {
+function createApp({ db = open(), env = process.env, syncOpts = {} } = {}) {
+  const SYNC = createSync(db, { base: env.SITE_URL || undefined, token: env.SITE_EXPORT_TOKEN || '', intervalS: +env.EXPORT_INTERVAL_S || 300, ...syncOpts });
   const PROD = env.NODE_ENV === 'production';
   const TOKEN = env.ADMIN_TOKEN || '';
   if (TOKEN.length < 16) { if (PROD) { console.error('FATAL : ADMIN_TOKEN absent ou trop court (16 caractères minimum).'); process.exit(1); } }
@@ -64,13 +66,23 @@ function createApp({ db = open(), env = process.env } = {}) {
   app.use((req, res, next) => req.session.admin ? next() : res.redirect(303, '/connexion'));
 
   // ---- Tableau de bord ----
+  function syncPanel() {
+    const x = SYNC.status();
+    if (!x.enabled) return `<div class="panel sync off"><b>🔌 Export du site : désactivé</b> <span class="muted sm">— définir SITE_EXPORT_TOKEN (= ANTICHEAT_EXPORT_TOKEN du site) pour une synchronisation automatique complète. Source actuelle : pages publiques.</span></div>`;
+    const c = x.last_counts, okState = SYNC.healthy();
+    return `<div class="panel sync ${x.last_error ? 'err' : 'ok'}"><b>${okState ? '🟢' : x.last_error ? '🔴' : '🟡'} Export du site (source principale)</b> · toutes les ${x.interval_s} s
+      <div class="sm">Dernière synchro réussie : <b>${V.fmt(x.last_ok)}</b>${x.last_mode ? ` (${esc(x.last_mode)})` : ''}${c ? ` · ${c.joueurs} joueurs, ${c.parties} parties, ${c.comptes} comptes liés, ${c.points} mouvements LP · ${x.last_alerts || 0} nouvelle(s) alerte(s)` : ''} · prochaine : ${V.fmt(x.next_at)}${x.running ? ' · en cours…' : ''}</div>
+      ${x.last_error ? `<div class="sm down">⚠ ${V.fmt(x.last_error.at)} : ${esc(x.last_error.message)}${x.fails > 1 ? ` (${x.fails} échecs consécutifs, nouvel essai différé)` : ''}</div>` : ''}
+      <div class="sm muted">Collecte publique : ${okState ? 'en veille (secours)' : 'active en secours tant que l\'export échoue'}.</div></div>`;
+  }
   const lastDecision = p => db.prepare('SELECT decision FROM reviews WHERE pseudo=? ORDER BY id DESC LIMIT 1').get(p)?.decision;
   app.get('/', (req, res) => {
     const th = engine.THRESHOLD(), rows = db.prepare('SELECT s.*, p.sr, p.wins, p.losses FROM scores s LEFT JOIN players p ON p.pseudo=s.pseudo ORDER BY s.score DESC, s.pseudo LIMIT 200').all();
     const n = q => db.prepare(q).get().n;
     const st = { joueurs: n('SELECT COUNT(*) n FROM players'), parties: n("SELECT COUNT(*) n FROM matches WHERE status='termine'"), alertes: n('SELECT COUNT(*) n FROM alerts WHERE seen=0'), suspects: n(`SELECT COUNT(*) n FROM scores WHERE score>=${th}`) };
-    res.page('Tableau de bord', `<section><div class="head"><h1>Tableau de bord</h1><div class="acts"><form method="post" action="/collecter"><button class="btn ghost sm">📡 Collecter maintenant</button></form><form method="post" action="/analyser"><button class="btn sm">🧠 Recalculer les scores</button></form></div></div>
+    res.page('Tableau de bord', `<section><div class="head"><h1>Tableau de bord</h1><div class="acts">${SYNC.status().enabled ? '<form method="post" action="/synchroniser"><button class="btn sm">🔄 Synchroniser maintenant</button></form>' : ''}<form method="post" action="/collecter"><button class="btn ghost sm">📡 Collecter maintenant</button></form><form method="post" action="/analyser"><button class="btn sm">🧠 Recalculer les scores</button></form></div></div>
     <div class="stats"><div><b>${st.joueurs}</b><span>joueurs suivis</span></div><div><b>${st.parties}</b><span>parties analysées</span></div><div><b>${st.suspects}</b><span>score ≥ ${th}</span></div><div class="${st.alertes ? 'hot' : ''}"><b>${st.alertes}</b><span>alertes non lues</span></div></div>
+    ${syncPanel()}
     <p class="muted sm">Dernière analyse : ${V.fmt(db.kvGet('last_scan'))} · dernière collecte : ${V.fmt(db.kvGet('last_collect'))} · source : ${esc(env.SITE_URL || 'https://liveroums-arena.onrender.com')}</p>
     <div class="table-wrap"><table><tr><th>Score</th><th>Joueur</th><th>SR</th><th>V / D</th><th>Signaux principaux</th><th>Décision admin</th></tr>
     ${rows.map(r => { const rs = JSON.parse(r.reasons); return `<tr class="${r.score >= th ? 'sus' : ''}"><td>${V.scoreBadge(r.score)}</td><td><a href="/joueurs/${encodeURIComponent(r.pseudo)}"><b>${esc(r.pseudo)}</b></a></td><td>${r.sr ?? '—'}</td><td>${r.wins ?? 0} / ${r.losses ?? 0}</td>
@@ -119,20 +131,29 @@ function createApp({ db = open(), env = process.env } = {}) {
   });
   const C = collector(db, { base: env.SITE_URL });
   app.post('/collecter', limiter(6e4, 3), async (req, res) => { const s = await C.cycle(); db.kvSet('last_collect', new Date().toISOString()); const r = await engine.run(db); req.flash('ok', `Collecte : ${s.requests} requêtes cumulées, ${s.errors} erreur(s). ${r.alerts} nouvelle(s) alerte(s).`); res.redirect(303, '/'); });
+  app.post('/synchroniser', limiter(6e4, 3), async (req, res) => {
+    if (!SYNC.status().enabled) { req.flash('err', 'SITE_EXPORT_TOKEN non défini.'); return res.redirect(303, '/'); }
+    if (SYNC.inBackoff()) { req.flash('err', `Le site limite les requêtes : nouvel essai automatique à ${V.fmt(SYNC.status().next_at)}.`); return res.redirect(303, '/'); }
+    const r = await SYNC.once();
+    if (r.ok) req.flash('ok', `Synchro ${r.mode} : ${r.counts.joueurs} joueurs, ${r.counts.parties} parties. ${r.alerts} nouvelle(s) alerte(s).`); else req.flash('err', 'Synchro échouée : ' + r.error);
+    res.redirect(303, '/');
+  });
   app.post('/analyser', async (req, res) => { const r = await engine.run(db); req.flash('ok', `${r.scored} joueurs analysés, ${r.alerts} nouvelle(s) alerte(s).`); res.redirect(303, '/'); });
   app.get('/signaux', (req, res) => res.page('Signaux', require('./signals').html));
   app.use((err, req, res, next) => { console.error(PROD ? err.message : err); res.status(500).send('Erreur interne.'); });
-  return { app, db, collector: C };
+  return { app, db, collector: C, sync: SYNC };
 }
 
 if (require.main === module) {
-  const { app, db, collector: C } = createApp();
+  const { app, db, collector: C, sync: SYNC } = createApp();
+  SYNC.start(3000); // base éphémère : la première synchro après démarrage est toujours complète
   const port = process.env.PORT || 3500;
   app.listen(port, () => console.log(`Anti-triche LiveRoums sur http://localhost:${port}`));
   if (process.env.COLLECT_ENABLED !== '0' && process.env.NODE_ENV !== 'test') {
     const every = Math.max(60, +process.env.COLLECT_INTERVAL_S || 180) * 1000;
-    const tick = async () => { await C.cycle(); db.kvSet('last_collect', new Date().toISOString()); await engine.run(db).catch(e => console.warn(e.message)); };
-    setTimeout(tick, 5000); setInterval(tick, every).unref();
+    const tick = async () => { if (SYNC.healthy()) return; // export sain → pas de double collecte
+      try { await C.cycle(); } catch (e) { return console.warn(e.message); } db.kvSet('last_collect', new Date().toISOString()); await engine.run(db).catch(e => console.warn(e.message)); };
+    setTimeout(tick, process.env.SITE_EXPORT_TOKEN ? 90000 : 5000); setInterval(tick, every).unref(); // laisse d'abord sa chance à l'export
   }
 }
 module.exports = { createApp };

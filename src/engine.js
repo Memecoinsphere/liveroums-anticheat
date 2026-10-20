@@ -34,7 +34,10 @@ async function llmSummary(r) {
     const j = await res.json(); return j.choices?.[0]?.message?.content?.trim() || null;
   } catch { return null; }
 }
-async function run(db, { now = Date.now(), log = console } = {}) {
+// Analyses sérialisées : deux déclencheurs simultanés (sync, collecte, bouton) ne peuvent pas créer d'alerte en double
+let queue = Promise.resolve();
+function run(db, opts) { const p = queue.then(() => runOnce(db, opts)); queue = p.catch(() => {}); return p; }
+async function runOnce(db, { now = Date.now(), log = console } = {}) {
   const res = D.score(dataset(db), now), th = THRESHOLD(), created = [];
   for (const r of Object.values(res)) {
     const prev = db.prepare('SELECT score FROM scores WHERE pseudo=?').get(r.pseudo);

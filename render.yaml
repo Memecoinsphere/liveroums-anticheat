@@ -19,6 +19,10 @@ services:
         generateValue: true
       - key: SITE_URL
         value: https://liveroums-arena.onrender.com
+      - key: SITE_EXPORT_TOKEN    # = ANTICHEAT_EXPORT_TOKEN du site ; active la synchro automatique (source principale)
+        sync: false
+      - key: EXPORT_INTERVAL_S    # intervalle de synchro de l'export (min 60 ; le site limite à 6 req/min)
+        value: "300"
       - key: COLLECT_ENABLED
         value: "1"
       - key: COLLECT_RPM          # requêtes/min vers le site (max 100, limite du site : 120/min/IP)

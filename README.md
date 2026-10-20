@@ -18,6 +18,13 @@ Les « duels » ne comptent que les petits formats (1v1 / 2v2) et les parties pr
 
 ## Sources de données
 
+0. **Synchronisation automatique avec l'export admin du site (recommandé, source principale)** : si `SITE_EXPORT_TOKEN` est défini (même valeur que `ANTICHEAT_EXPORT_TOKEN` côté site), l'agent interroge `GET {SITE_URL}/api/admin/anticheat-export?since=…` avec `Authorization: Bearer` toutes les `EXPORT_INTERVAL_S` secondes (300 par défaut, minimum 60 ; la limite du site est de 6 req/min).
+   - **Au démarrage, synchro complète** (la base Render est éphémère), puis **incrémentale** depuis la dernière synchro réussie (avec 2 min de chevauchement ; l'import est idempotent, donc aucun doublon).
+   - Chaque synchro importe les données, recalcule les scores et crée les alertes (tableau de bord + webhook Discord). Les alertes sont dédupliquées : une nouvelle alerte n'est créée que si le score franchit le seuil pour la première fois ou augmente de 15 points ; les analyses sont sérialisées.
+   - Erreurs gérées sans jamais arrêter le service : **401/403** (jeton refusé) et **404** (export désactivé sur le site) → nouvel essai dans 15 min, 30 min… ; **429** → respect de `Retry-After` ; réseau / réponse invalide → backoff exponentiel (2×, 4×… l'intervalle, plafonné à 1 h).
+   - Le tableau de bord affiche l'état (dernière synchro réussie en heure de Paris, volumes, dernière erreur, prochaine tentative) et un bouton **« Synchroniser maintenant »** (protégé CSRF).
+   - Tant que l'export fonctionne, la collecte des pages publiques est **en veille** (pas de double collecte) ; elle reprend automatiquement en secours si aucune synchro n'a réussi depuis 3 intervalles. Les deux sources fusionnent sur les mêmes clés (pseudo, code de partie), sans double comptage.
+
 1. **Collecte automatique (HTTP)** depuis `SITE_URL`, en lecture seule, avec un seau à jetons qui respecte la limite du site (120 req/min/IP sur /api) : 40 req/min par défaut, plafonné à 100. Un cycle toutes les 180 s : classement → parties en cours connues → API joueurs (découverte des codes de partie) → 5 profils par cycle (rafraîchis chaque jour).
 2. **Import manuel** (page *Import*) en JSON ou CSV, si un export est disponible.
 
@@ -90,6 +97,8 @@ Node.js 22 recommandé (≥ 20 fonctionne).
 | `ADMIN_TOKEN` | **oui** | — | Jeton de connexion au tableau de bord (≥ 16 caractères ; 32+ aléatoires conseillés) |
 | `SESSION_SECRET` | **oui en production** | aléatoire | Secret des cookies de session (≥ 32 caractères ; généré par Render) |
 | `NODE_ENV` | conseillé | — | `production` active les cookies `secure` et les contrôles stricts |
+| `SITE_EXPORT_TOKEN` | conseillé | — | Jeton Bearer de l'export admin du site (= `ANTICHEAT_EXPORT_TOKEN` du site) ; active la synchro automatique |
+| `EXPORT_INTERVAL_S` | non | 300 | Intervalle de synchro de l'export (min 60) |
 | `SITE_URL` | non | https://liveroums-arena.onrender.com | Site surveillé |
 | `COLLECT_ENABLED` | non | 1 | `0` pour désactiver la collecte (import seul) |
 | `COLLECT_RPM` | non | 40 | Requêtes/min vers le site (max 100) |
@@ -107,6 +116,7 @@ Node.js 22 recommandé (≥ 20 fonctionne).
 2. Render → *New* → *Blueprint* → choisir le dépôt (`render.yaml` est détecté) → saisir `ADMIN_TOKEN` (et le webhook Discord si voulu).
 3. Limites du plan gratuit :
    - **Base éphémère** : le disque est effacé à chaque redéploiement ou redémarrage. Les scores sont recalculés à partir des nouvelles observations, mais **les décisions admin et l'historique sont perdus**. Pour les conserver, passer sur un plan avec disque persistant (`DATA_DIR` sur le disque) ou réimporter un export.
+   - **Garder l'agent éveillé (important pour l'automatisme)** : les minuteries internes de l'agent (synchro, collecte) **ne suffisent pas** à empêcher la mise en veille, car Render ne compte que le trafic HTTP entrant ; un « auto-ping » depuis le service lui-même ne marche pas non plus de façon fiable. Il faut un pinger **externe** sur `/healthz` (≤ 10 min). À chaque réveil, une synchro complète est relancée automatiquement.
    - **Mise en veille** après 15 min sans trafic, ce qui stoppe la collecte. Configurer un pinger externe (UptimeRobot, cron-job.org…) sur `https://<service>.onrender.com/healthz` toutes les 10 min.
 
 ## Sécurité
